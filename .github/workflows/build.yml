@@ -23,9 +23,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 40
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
 
@@ -33,14 +33,6 @@ jobs:
 
       - name: Scrape nationaltoday.com
         run: python -u scraper/scrape.py
-
-      - id: pages
-        uses: actions/configure-pages@v5
-
-      - name: Build .ics feeds
-        env:
-          PAGES_URL: ${{ steps.pages.outputs.base_url }}
-        run: python scraper/build_ics.py
 
       - name: Commit scraped data
         run: |
@@ -53,6 +45,14 @@ jobs:
             git commit -m "Update scraped holiday data"
             git push
           fi
+
+      - id: pages
+        uses: actions/configure-pages@v5
+
+      - name: Build .ics feeds
+        env:
+          PAGES_URL: ${{ steps.pages.outputs.base_url }}
+        run: python scraper/build_ics.py
 
       - uses: actions/upload-pages-artifact@v3
         with:
