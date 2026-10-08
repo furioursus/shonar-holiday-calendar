@@ -15,9 +15,12 @@ from __future__ import annotations
 import calendar
 import datetime as dt
 import json
+import os
 import re
 import sys
 import time
+from collections import Counter
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 import requests
@@ -50,7 +53,17 @@ SESSION.headers.update(
     }
 )
 
-REQUEST_DELAY = 0.4
+REQUEST_DELAY = 0.3
+WORKERS = 6
+# Unresolved observances carry over to the next run via the cache, so cap how
+# long one run spends on them.
+RESOLVE_BUDGET_SECONDS = 15 * 60
+STATUS = Counter()
+
+
+def annotate(level: str, message: str) -> None:
+    """Surface a message as a GitHub Actions annotation (and plain log line)."""
+    print(f"::{level}::{message}" if os.environ.get("GITHUB_ACTIONS") else message, flush=True)
 
 
 def fetch(path: str) -> str | None:
@@ -59,10 +72,12 @@ def fetch(path: str) -> str | None:
         try:
             resp = SESSION.get(url, timeout=30)
         except requests.RequestException as exc:
+            STATUS[type(exc).__name__] += 1
             print(f"  ! {url}: {exc}", file=sys.stderr)
             time.sleep(2 * (attempt + 1))
             continue
         time.sleep(REQUEST_DELAY)
+        STATUS[resp.status_code] += 1
         if resp.status_code == 200:
             return resp.text
         if resp.status_code == 404:
@@ -209,7 +224,17 @@ def resolve_multiday(event: dict, cache: dict) -> None:
     if key in cache:
         event.update(cache[key])
         return
+    result = lookup_range(event)
+    if result is not None:
+        cache[key] = result
+        event.update(result)
+
+
+def lookup_range(event: dict) -> dict | None:
+    """Returns None when the page couldn't be fetched, so it's retried next run."""
     html = fetch(f"/{event['slug']}/")
+    if html is None:
+        return None
     resolved: dict = {}
     if html:
         soup = BeautifulSoup(html, "html.parser")
@@ -224,8 +249,7 @@ def resolve_multiday(event: dict, cache: dict) -> None:
                 resolved = {"start": start.isoformat(), "end": end.isoformat(), "kind": kind}
         if desc and desc.get("content"):
             resolved["summary"] = desc["content"].strip()
-    cache[key] = resolved
-    event.update(resolved)
+    return resolved
 
 
 def load_existing() -> dict:
@@ -247,21 +271,52 @@ def main() -> int:
             print(f"  ! could not fetch {name}", file=sys.stderr)
             continue
         month_events = parse_month_page(html, month_num, today)
-        print(f"  {len(month_events)} entries")
+        print(f"  {len(month_events)} entries", flush=True)
         fresh.extend(month_events)
 
+    annotate("notice", f"month pages: {len(fresh)} entries; HTTP {dict(STATUS)}")
     if len(fresh) < 1000:
         # A full year is ~8k entries; anything this small means the layout
         # changed or we were blocked. Don't overwrite good data with it.
-        print(f"only {len(fresh)} entries scraped; aborting", file=sys.stderr)
+        annotate("error", f"only {len(fresh)} entries scraped; aborting")
         return 1
 
     candidates = [
         e for e in fresh if MULTIDAY_HINT.search(e["title"]) or e["start"].endswith("-01")
     ]
-    print(f"resolving {len(candidates)} possible multi-day observances")
+    todo = []
     for e in candidates:
-        resolve_multiday(e, cache)
+        key = f"{e['slug']}@{e['start']}"
+        if key in cache:
+            e.update(cache[key])
+        else:
+            todo.append(e)
+    print(f"{len(candidates)} possible multi-day observances, {len(todo)} uncached", flush=True)
+    started = time.monotonic()
+    done = 0
+    with ThreadPoolExecutor(WORKERS) as pool:
+        futures = {}
+        for e in todo:
+            futures[pool.submit(lookup_range, e)] = e
+        for fut in as_completed(futures):
+            e = futures[fut]
+            if time.monotonic() - started > RESOLVE_BUDGET_SECONDS:
+                for f in futures:
+                    f.cancel()
+                annotate("warning", f"resolve budget hit after {done}/{len(todo)}; rest next run")
+                break
+            try:
+                result = fut.result()
+            except Exception as exc:  # keep going; it'll retry next run
+                print(f"  ! {e['slug']}: {exc}", file=sys.stderr)
+                continue
+            done += 1
+            if result is None:
+                continue
+            cache[f"{e['slug']}@{e['start']}"] = result
+            e.update(result)
+            if done % 100 == 0:
+                print(f"  resolved {done}/{len(todo)}", flush=True)
 
     # Dedupe (the same holiday can appear on two month pages for ranges).
     seen: set[tuple[str, str]] = set()
@@ -300,7 +355,7 @@ def main() -> int:
     kinds = {}
     for e in events:
         kinds[e["kind"]] = kinds.get(e["kind"], 0) + 1
-    print(f"wrote {len(events)} events {kinds}")
+    annotate("notice", f"wrote {len(events)} events {kinds}; HTTP {dict(STATUS)}")
     return 0
 
 
