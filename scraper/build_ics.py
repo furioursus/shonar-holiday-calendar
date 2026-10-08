@@ -110,7 +110,7 @@ def link(e: dict) -> str:
 
 
 def meta_line(e: dict) -> str:
-    bits = [e.get("category", "")] + e.get("tags", [])
+    bits = (e.get("categories") or [e.get("category", "")]) + e.get("tags", [])
     return " · ".join(b for b in bits if b)
 
 
@@ -243,7 +243,8 @@ def build(events: list[dict]) -> list[dict]:
     # 5. Per-category feeds.
     by_cat: dict[str, list[dict]] = defaultdict(list)
     for e in events:
-        by_cat[e.get("category") or "Other"].append(e)
+        for cat in e.get("categories") or [e.get("category") or "Other"]:
+            by_cat[cat].append(e)
     for cat, items in sorted(by_cat.items()):
         cal = Calendar(f"National Today · {cat}", f"{cat} holidays from nationaltoday.com.")
         for e in items:

@@ -137,7 +137,10 @@ def parse_month_page(html: str, month: int, today: dt.date) -> list[dict]:
         title_link = row.select_one("td.title a")
         if title_link is None or current is None:
             continue
-        category_el = row.select_one("td.category")
+        categories = [a.get_text(" ", strip=True) for a in row.select("td.category a")]
+        if not categories and row.select_one("td.category"):
+            categories = [row.select_one("td.category").get_text(" ", strip=True)]
+        categories = [c for c in categories if c]
         tags = [a.get_text(strip=True) for a in row.select("td.tags a")]
         events.append(
             {
@@ -145,7 +148,8 @@ def parse_month_page(html: str, month: int, today: dt.date) -> list[dict]:
                 "slug": slug_from_href(title_link.get("href", "")),
                 "start": current.isoformat(),
                 "end": current.isoformat(),
-                "category": category_el.get_text(" ", strip=True) if category_el else "",
+                "category": categories[0] if categories else "",
+                "categories": categories,
                 "tags": tags,
                 "kind": "day",
             }
